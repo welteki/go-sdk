@@ -75,6 +75,20 @@ func WithFunctionTokenCache(cache TokenCache) ClientOption {
 	}
 }
 
+// FunctionOption configures a function operation.
+type FunctionOption func(*functionOptions)
+
+type functionOptions struct {
+	usage bool
+}
+
+// WithUsage includes CPU and RAM usage metrics in function query responses.
+func WithUsage() FunctionOption {
+	return func(opts *functionOptions) {
+		opts.usage = true
+	}
+}
+
 // NewClient creates a Client for managing OpenFaaS and invoking functions
 func NewClient(gatewayURL *url.URL, auth ClientAuth, client *http.Client) *Client {
 	return NewClientWithOpts(gatewayURL, client, WithAuthentication(auth))
@@ -542,13 +556,23 @@ func (s *Client) GetInfo(ctx context.Context) (SystemInfo, error) {
 }
 
 // GetFunction gives a richer payload than GetFunctions, but for a specific function
-func (s *Client) GetFunction(ctx context.Context, name, namespace string) (types.FunctionStatus, error) {
+func (s *Client) GetFunction(ctx context.Context, name, namespace string, opts ...FunctionOption) (types.FunctionStatus, error) {
 	u, _ := url.Parse(s.GatewayURL.String())
 	u.Path = "/system/function/" + name
 
-	if len(namespace) > 0 {
+	functionOpts := &functionOptions{}
+	for _, opt := range opts {
+		opt(functionOpts)
+	}
+
+	if len(namespace) > 0 || functionOpts.usage {
 		query := u.Query()
-		query.Set("namespace", namespace)
+		if len(namespace) > 0 {
+			query.Set("namespace", namespace)
+		}
+		if functionOpts.usage {
+			query.Set("usage", "1")
+		}
 		u.RawQuery = query.Encode()
 	}
 

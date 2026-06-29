@@ -834,3 +834,87 @@ func TestSdk_DeleteSecret(t *testing.T) {
 		})
 	}
 }
+
+func TestSdk_GetFunction_WithUsage(t *testing.T) {
+	funcName := "test-func"
+	nsName := "openfaas-fn"
+
+	tests := []struct {
+		name          string
+		namespace     string
+		withUsage     bool
+		expectedQuery map[string]string
+	}{
+		{
+			name:      "usage param included when WithUsage()",
+			namespace: nsName,
+			withUsage: true,
+			expectedQuery: map[string]string{
+				"namespace": nsName,
+				"usage":     "1",
+			},
+		},
+		{
+			name:      "usage param included without namespace",
+			withUsage: true,
+			expectedQuery: map[string]string{
+				"usage": "1",
+			},
+		},
+		{
+			name:      "usage param not included by default",
+			namespace: nsName,
+			withUsage: false,
+			expectedQuery: map[string]string{
+				"namespace": nsName,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := httptest.NewServer(
+				http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+					for k, v := range test.expectedQuery {
+						got := req.URL.Query().Get(k)
+						if got != v {
+							t.Errorf("query param %q: want %q, got %q", k, v, got)
+						}
+					}
+
+					if !test.withUsage {
+						got := req.URL.Query().Get("usage")
+						if got != "" {
+							t.Errorf("expected no usage query param, got %q", got)
+						}
+					}
+
+					rw.WriteHeader(http.StatusOK)
+					rw.Write([]byte(`{"name":"` + funcName + `","namespace":"` + nsName + `"}`))
+				}),
+			)
+
+			sU, _ := url.Parse(s.URL)
+			defer s.Close()
+
+			client := NewClient(sU, nil, http.DefaultClient)
+
+			var fn types.FunctionStatus
+			var err error
+
+			if test.withUsage {
+				fn, err = client.GetFunction(context.Background(), funcName, test.namespace, WithUsage())
+			} else {
+				fn, err = client.GetFunction(context.Background(), funcName, test.namespace)
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			if fn.Name != funcName {
+				t.Errorf("want function name %q, got %q", funcName, fn.Name)
+			}
+		})
+	}
+}
