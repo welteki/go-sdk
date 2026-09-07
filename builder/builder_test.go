@@ -316,11 +316,11 @@ func TestHandlerFolderWithinScope(t *testing.T) {
 			dst, err := handlerFolderWithinScope(buildRoot, tc.handlerFolder)
 
 			if tc.err && err == nil {
-				t.Fatalf("expected an error for handler_folder %q but got none (dst: %s)", tc.handlerFolder, dst)
+				t.Fatalf("expected an error for handler folder %q but got none (dst: %s)", tc.handlerFolder, dst)
 			}
 
 			if !tc.err && err != nil {
-				t.Fatalf("unexpected error for handler_folder %q: %s", tc.handlerFolder, err)
+				t.Fatalf("unexpected error for handler folder %q: %s", tc.handlerFolder, err)
 			}
 
 			if !tc.err {
@@ -330,6 +330,86 @@ func TestHandlerFolderWithinScope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFunctionBuildContextPath(t *testing.T) {
+	buildDir := filepath.Join("workspace", "build")
+	cases := []struct {
+		name         string
+		functionName string
+		want         string
+		wantErr      bool
+	}{
+		{
+			name:         "ordinary function name",
+			functionName: "echo",
+			want:         filepath.Join(buildDir, "echo"),
+		},
+		{
+			name:         "filesystem-safe opaque name",
+			functionName: "Function_Name",
+			want:         filepath.Join(buildDir, "Function_Name"),
+		},
+		{name: "empty name", functionName: "", wantErr: true},
+		{name: "current directory", functionName: ".", wantErr: true},
+		{name: "parent directory", functionName: "..", wantErr: true},
+		{name: "path traversal", functionName: "../outside", wantErr: true},
+		{name: "nested slash path", functionName: "group/function", wantErr: true},
+		{name: "nested backslash path", functionName: `group\function`, wantErr: true},
+		{name: "absolute path", functionName: string(filepath.Separator) + "outside", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := functionBuildContextPath(buildDir, tc.functionName)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for function name %q, got path %q", tc.functionName, got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error for function name %q: %s", tc.functionName, err)
+			}
+			if got != tc.want {
+				t.Fatalf("unexpected build context path: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateBuildContextRejectsFunctionTraversalBeforeRemoveAll(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("error creating outside dir: %s", err)
+	}
+
+	want := []byte("must not be deleted\n")
+	sentinel := filepath.Join(outside, "sentinel")
+	if err := os.WriteFile(sentinel, want, 0644); err != nil {
+		t.Fatalf("error writing outside sentinel: %s", err)
+	}
+
+	_, err := CreateBuildContext(
+		filepath.Join("..", "outside"),
+		filepath.Join(root, "handler"),
+		"dockerfile",
+		nil,
+		WithBuildDir(filepath.Join(root, "build")),
+	)
+	if err == nil {
+		t.Fatal("expected an error for a function name containing path traversal")
+	}
+
+	got, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("outside sentinel was removed before function name validation: %s", readErr)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("outside sentinel changed: got %q, want %q", got, want)
 	}
 }
 
@@ -372,7 +452,7 @@ func TestCreateBuildContextDoesNotOverwriteOutsideFile(t *testing.T) {
 		WithHandlerOverlay(filepath.Join("..", "..", "outside")),
 	)
 	if err == nil {
-		t.Fatal("expected an error for handler_folder escaping the build context")
+		t.Fatal("expected an error for handler folder escaping the build context")
 	}
 
 	got, readErr := os.ReadFile(outsideFile)

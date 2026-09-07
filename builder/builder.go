@@ -439,6 +439,7 @@ func WithHandlerOverlay(path string) BuildContextOption {
 //
 // The function returns the path to the build context, `./build/<functionName>` by default.
 // The build directory can be overridden by setting the `builder.WithBuildDir` option.
+// functionName must be a valid directory name.
 // An error is returned if creating the build context fails.
 func CreateBuildContext(functionName string, handler string, language string, copyExtraPaths []string, options ...BuildContextOption) (string, error) {
 	c := &BuildContextConfig{
@@ -451,7 +452,10 @@ func CreateBuildContext(functionName string, handler string, language string, co
 		option(c)
 	}
 
-	contextPath := path.Join(c.BuildDir, functionName)
+	contextPath, err := functionBuildContextPath(c.BuildDir, functionName)
+	if err != nil {
+		return "", err
+	}
 
 	if err := os.RemoveAll(contextPath); err != nil {
 		return contextPath, fmt.Errorf("unable to clear context folder: %s", contextPath)
@@ -471,7 +475,7 @@ func CreateBuildContext(functionName string, handler string, language string, co
 		}
 	}
 
-	err := os.MkdirAll(handlerDst, permissions)
+	err = os.MkdirAll(handlerDst, permissions)
 	if err != nil {
 		return contextPath, fmt.Errorf("error creating function handler path %s: %w", handlerDst, err)
 	}
@@ -523,18 +527,16 @@ func CreateBuildContext(functionName string, handler string, language string, co
 	return contextPath, nil
 }
 
-// functionBuildContextPath constructs the per-function build path and ensures
-// functionName is one portable path component beneath buildDir.
+// functionBuildContextPath constructs the build path for a function.
+// functionName must be a valid directory name.
 func functionBuildContextPath(buildDir, functionName string) (string, error) {
-	name := filepath.FromSlash(functionName)
-	if name == "" || name == "." || name == ".." ||
-		strings.ContainsAny(functionName, `/\`) ||
-		filepath.IsAbs(name) || filepath.VolumeName(name) != "" ||
-		filepath.Base(name) != name {
+	if !filepath.IsLocal(functionName) ||
+		functionName == "." ||
+		strings.ContainsAny(functionName, `/\`) {
 		return "", fmt.Errorf("function name %q must be a single path component within the build directory %q", functionName, buildDir)
 	}
 
-	return filepath.Join(buildDir, name), nil
+	return filepath.Join(buildDir, functionName), nil
 }
 
 // handlerFolderWithinScope validates handlerFolder lexically and returns its path
