@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 
 	hmac "github.com/alexellis/hmac/v2"
@@ -257,4 +258,128 @@ func createTestTar(t *testing.T) []byte {
 		t.Fatalf("tar.Close: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func TestHandlerFolderWithinScope(t *testing.T) {
+	cases := []struct {
+		name          string
+		handlerFolder string
+		err           bool
+	}{
+		{
+			name:          "empty folder selects build root",
+			handlerFolder: "",
+		},
+		{
+			name:          "dot selects build root",
+			handlerFolder: ".",
+		},
+		{
+			name:          "nested handler folder stays in scope",
+			handlerFolder: "src/function",
+		},
+		{
+			name:          "internal traversal stays in scope",
+			handlerFolder: "src/../function",
+		},
+		{
+			name:          "default handler folder stays in scope",
+			handlerFolder: "function",
+			err:           false,
+		},
+		{
+			name:          "path traversal escapes the build context",
+			handlerFolder: "../../../../tmp/pro-poc-out",
+			err:           true,
+		},
+		{
+			name:          "hidden path traversal escapes the build context",
+			handlerFolder: "./function/../../../../tmp/pro-poc-out",
+			err:           true,
+		},
+		{
+			name:          "absolute path is rejected",
+			handlerFolder: "/tmp/pro-poc-out",
+			err:           true,
+		},
+		{
+			name:          "prefix sibling is rejected",
+			handlerFolder: "../other",
+			err:           true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buildRoot := filepath.Join(t.TempDir(), "build", "fn")
+
+			dst, err := handlerFolderWithinScope(buildRoot, tc.handlerFolder)
+
+			if tc.err && err == nil {
+				t.Fatalf("expected an error for handler_folder %q but got none (dst: %s)", tc.handlerFolder, dst)
+			}
+
+			if !tc.err && err != nil {
+				t.Fatalf("unexpected error for handler_folder %q: %s", tc.handlerFolder, err)
+			}
+
+			if !tc.err {
+				want := filepath.Join(buildRoot, tc.handlerFolder)
+				if dst != want {
+					t.Fatalf("expected destination %s, got %s", want, dst)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateBuildContextDoesNotOverwriteOutsideFile(t *testing.T) {
+	root := t.TempDir()
+
+	handler := filepath.Join(root, "handler")
+	if err := os.MkdirAll(handler, 0755); err != nil {
+		t.Fatalf("error creating handler dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(handler, "fn.py"), []byte("attacker controlled\n"), 0644); err != nil {
+		t.Fatalf("error writing handler file: %s", err)
+	}
+
+	templateDir := filepath.Join(root, "template")
+	if err := os.MkdirAll(filepath.Join(templateDir, "python"), 0755); err != nil {
+		t.Fatalf("error creating template dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(templateDir, "python", "Dockerfile"), []byte("FROM alpine\n"), 0644); err != nil {
+		t.Fatalf("error writing template file: %s", err)
+	}
+
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("error creating outside dir: %s", err)
+	}
+	want := []byte("original content\n")
+	outsideFile := filepath.Join(outside, "fn.py")
+	if err := os.WriteFile(outsideFile, want, 0644); err != nil {
+		t.Fatalf("error writing outside file: %s", err)
+	}
+
+	_, err := CreateBuildContext(
+		"fn",
+		handler,
+		"python",
+		nil,
+		WithBuildDir(filepath.Join(root, "build")),
+		WithTemplateDir(templateDir),
+		WithHandlerOverlay(filepath.Join("..", "..", "outside")),
+	)
+	if err == nil {
+		t.Fatal("expected an error for handler_folder escaping the build context")
+	}
+
+	got, readErr := os.ReadFile(outsideFile)
+	if readErr != nil {
+		t.Fatalf("error reading outside file after rejected build context: %s", readErr)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("outside file was overwritten: got %q, want %q", got, want)
+	}
 }

@@ -457,14 +457,18 @@ func CreateBuildContext(functionName string, handler string, language string, co
 		return contextPath, fmt.Errorf("unable to clear context folder: %s", contextPath)
 	}
 
-	handlerDst := contextPath
-	if language != "dockerfile" {
-		handlerDst = path.Join(contextPath, c.TemplateHandlerOverlay)
-	}
-
 	permissions := defaultDirPermissions
 	if isRunningInCI() {
 		permissions = 0777
+	}
+
+	handlerDst := contextPath
+	if language != "dockerfile" {
+		var err error
+		handlerDst, err = handlerFolderWithinScope(contextPath, c.TemplateHandlerOverlay)
+		if err != nil {
+			return contextPath, err
+		}
 	}
 
 	err := os.MkdirAll(handlerDst, permissions)
@@ -517,6 +521,35 @@ func CreateBuildContext(functionName string, handler string, language string, co
 	}
 
 	return contextPath, nil
+}
+
+// functionBuildContextPath constructs the per-function build path and ensures
+// functionName is one portable path component beneath buildDir.
+func functionBuildContextPath(buildDir, functionName string) (string, error) {
+	name := filepath.FromSlash(functionName)
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsAny(functionName, `/\`) ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" ||
+		filepath.Base(name) != name {
+		return "", fmt.Errorf("function name %q must be a single path component within the build directory %q", functionName, buildDir)
+	}
+
+	return filepath.Join(buildDir, name), nil
+}
+
+// handlerFolderWithinScope validates handlerFolder lexically and returns its path
+// beneath buildRoot. An empty folder or "." selects buildRoot itself.
+// It rejects absolute paths and relative paths that escape buildRoot.
+func handlerFolderWithinScope(buildRoot, handlerFolder string) (string, error) {
+	folder := filepath.FromSlash(handlerFolder)
+	if folder == "" {
+		folder = "."
+	}
+	if !filepath.IsLocal(folder) {
+		return "", fmt.Errorf("handler folder %q must be a relative path within the build context %q", handlerFolder, buildRoot)
+	}
+
+	return filepath.Join(buildRoot, folder), nil
 }
 
 // pathInScope returns the absolute path to `path` and ensures that it is located within the
