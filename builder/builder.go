@@ -509,17 +509,12 @@ func CreateBuildContext(functionName string, handler string, language string, co
 	}
 
 	for _, extraPath := range copyExtraPaths {
-		extraPathAbs, err := pathInScope(extraPath, ".")
+		extraPathAbs, extraPathRel, err := pathInScope(extraPath, ".")
 		if err != nil {
 			return contextPath, err
 		}
-		// Note that if template is nil or the language is `dockerfile`, then
-		// handlerDest == contextPath, the docker build context, not the handler folder
-		// inside the docker build context.
-		if err := copyFiles(
-			extraPathAbs,
-			filepath.Clean(path.Join(handlerDst, extraPath)),
-		); err != nil {
+		// Use the validated relative path to keep the destination beneath handlerDst.
+		if err := copyFiles(extraPathAbs, filepath.Join(handlerDst, extraPathRel)); err != nil {
 			return contextPath, fmt.Errorf("error copying extra paths: %w", err)
 		}
 	}
@@ -554,29 +549,33 @@ func handlerFolderWithinScope(buildRoot, handlerFolder string) (string, error) {
 	return filepath.Join(buildRoot, folder), nil
 }
 
-// pathInScope returns the absolute path to `path` and ensures that it is located within the
-// provided scope. An error will be returned, if the path is outside of the provided scope.
-func pathInScope(path string, scope string) (string, error) {
+// pathInScope returns the absolute and scope-relative paths after checking lexical
+// containment. It rejects paths outside scope and paths equal to scope itself.
+func pathInScope(path string, scope string) (string, string, error) {
 	scope, err := filepath.Abs(filepath.FromSlash(scope))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	abs, err := filepath.Abs(filepath.FromSlash(path))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	if abs == scope {
-		return "", fmt.Errorf("forbidden path appears to equal the entire project: %s (%s)", path, abs)
+	rel, err := filepath.Rel(scope, abs)
+	if err != nil {
+		return "", "", fmt.Errorf("unable to resolve path %s: %w", path, err)
 	}
 
-	if strings.HasPrefix(abs, scope) {
-		return abs, nil
+	if rel == "." {
+		return "", "", fmt.Errorf("forbidden path appears to equal the entire project: %s (%s)", path, abs)
 	}
 
-	// default return is an error
-	return "", fmt.Errorf("forbidden path appears to be outside of the build context: %s (%s)", path, abs)
+	if !filepath.IsLocal(rel) {
+		return "", "", fmt.Errorf("forbidden path appears to be outside of the build context: %s (%s)", path, abs)
+	}
+
+	return abs, rel, nil
 }
 
 const defaultDirPermissions os.FileMode = 0700

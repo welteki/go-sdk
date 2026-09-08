@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	hmac "github.com/alexellis/hmac/v2"
@@ -461,5 +462,132 @@ func TestCreateBuildContextDoesNotOverwriteOutsideFile(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("outside file was overwritten: got %q, want %q", got, want)
+	}
+}
+
+func TestCreateBuildContextRejectsPrefixSiblingExtraPath(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	sibling := filepath.Join(root, "proj-other")
+
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatalf("error creating project dir: %s", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sibling, "secret"), 0755); err != nil {
+		t.Fatalf("error creating sibling dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "secret", "data.txt"), []byte("LEAK"), 0644); err != nil {
+		t.Fatalf("error writing sibling file: %s", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(proj); err != nil {
+		t.Fatalf("error changing working directory: %s", err)
+	}
+	defer os.Chdir(oldWd)
+
+	handler := filepath.Join(proj, "handler")
+	if err := os.MkdirAll(handler, 0755); err != nil {
+		t.Fatalf("error creating handler dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(handler, "fn.py"), []byte("x"), 0644); err != nil {
+		t.Fatalf("error writing handler file: %s", err)
+	}
+
+	_, err = CreateBuildContext(
+		"fn",
+		handler,
+		"dockerfile",
+		[]string{"../proj-other/secret/data.txt"},
+		WithBuildDir("build"),
+	)
+	if err == nil {
+		t.Fatal("expected an error for an extra path resolving to a sibling directory that shares the project name prefix")
+	}
+}
+
+func TestCreateBuildContextKeepsExtraPathInsideFunctionContext(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "project")
+	if err := os.MkdirAll(filepath.Join(proj, "shared"), 0755); err != nil {
+		t.Fatalf("error creating shared dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "shared", "sentinel"), []byte("hi"), 0644); err != nil {
+		t.Fatalf("error writing sentinel: %s", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(proj); err != nil {
+		t.Fatalf("error changing working directory: %s", err)
+	}
+	defer os.Chdir(oldWd)
+
+	handler := filepath.Join(proj, "handler")
+	if err := os.MkdirAll(handler, 0755); err != nil {
+		t.Fatalf("error creating handler dir: %s", err)
+	}
+	if err := os.WriteFile(filepath.Join(handler, "fn.py"), []byte("x"), 0644); err != nil {
+		t.Fatalf("error writing handler file: %s", err)
+	}
+
+	escaped := filepath.Join(proj, "build", "project", "shared", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(escaped), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(escaped, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The source resolves back inside the project, so it is accepted, but the
+	// destination must be derived from the resolved source and stay within the
+	// function build context rather than reusing the raw path with its ".." components.
+	ctx, err := CreateBuildContext(
+		"fn",
+		handler,
+		"dockerfile",
+		[]string{"../project/shared/sentinel"},
+		WithBuildDir("build"),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	wantInside := filepath.Join(ctx, "shared", "sentinel")
+	got, err := os.ReadFile(wantInside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hi" {
+		t.Fatalf("copied content: got %q, want %q", got, "hi")
+	}
+
+	got, err = os.ReadFile(escaped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("outside sentinel was overwritten: got %q, want %q", got, "original")
+	}
+}
+
+func TestPathInScopeRejectsScopeRoot(t *testing.T) {
+	scope := t.TempDir()
+	if _, _, err := pathInScope(scope, scope); err == nil {
+		t.Fatal("expected an error when the path equals the scope")
+	}
+}
+
+func TestPathInScopeRejectsScopeRootWithDifferentCase(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path comparisons are case-insensitive")
+	}
+	if _, _, err := pathInScope(`C:\Project`, `C:\project`); err == nil {
+		t.Fatal("expected an error when the path equals the scope with different casing")
 	}
 }
